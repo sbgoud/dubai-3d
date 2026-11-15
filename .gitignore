@@ -5,3 +5,6 @@ run.log
 *.local
 .vercel
 FAILED.txt
+
+__pycache__/
+*.pyc
