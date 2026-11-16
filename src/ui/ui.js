@@ -246,12 +246,18 @@ export class UI {
     const perPx = worldH / Math.max(1, h);
     const targetPx = 96;
     let metres = perPx * targetPx;
-    let nice = NICE[0];
-    let power = Math.pow(10, Math.floor(Math.log10(metres)));
-    while (nice * power < metres) nice = nice === 5 ? NICE[0] * power * 10 : nice;
+    if (!isFinite(metres) || metres <= 0) metres = 1;
+    const power = Math.pow(10, Math.floor(Math.log10(metres)));
+    // smallest "nice" step (1, 2, 5 x power) that covers the distance
+    let nice = 10;
+    for (const step of NICE) {
+      if (step * power >= metres) {
+        nice = step;
+        break;
+      }
+    }
     metres = nice * power;
-    if (metres < power) metres = power;
-    const px = Math.round(metres / perPx);
+    const px = perPx > 0 ? Math.round(metres / perPx) : 24;
     this.el.scaleBar.style.width = `${Math.max(24, Math.min(220, px))}px`;
     this.el.scaleLabel.textContent =
       metres >= 1000 ? `${(metres / 1000).toFixed(metres % 1000 ? 1 : 0)} km` : `${Math.round(metres)} m`;

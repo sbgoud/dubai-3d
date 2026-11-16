@@ -146,7 +146,9 @@ export function createBuildings() {
     const c = new Uint8Array(col.buffer, 0, vCount * 3).slice();
     const s = new Uint8Array(sed.buffer, 0, vCount).slice();
     const w = new Int16Array(wal.buffer, 0, vCount).slice();
-    const index = new Uint16Array(iCount);
+    // 32-bit indices: a single flush can hold more than 65k triangles worth
+    // of indices, which overflows a Uint16Array.
+    const index = new Uint32Array(iCount);
     for (let i = 0; i < iCount; i++) index[i] = idx[i];
 
     geo.setAttribute('position', new THREE.BufferAttribute(p, 3));
