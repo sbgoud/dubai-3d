@@ -1,60 +1,99 @@
 /**
  * Network + decode pipeline for the static Dubai extract.
+ *
+ * Every request has a hard timeout and is retried with exponential backoff.
+ * Building chunks are independent, so a single bad chunk never prevents the
+ * rest of the city from rendering.
  */
 
-import { BuildingFile, RoadFile } from './decode.js';
+import { BuildingChunk, RoadFile } from './decode.js';
 
-async function fetchWithProgress(url, onProgress) {
-  const res = await fetch(url, { cache: 'force-cache' });
-  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
-  const total = Number(res.headers.get('content-length')) || 0;
+const RETRIES = 3;
+const TIMEOUT = 15000;
+const BACKOFF = 350;
 
-  const encoding = (res.headers.get('content-encoding') || '').toLowerCase();
-  const alreadyDecoded = encoding.includes('gzip');
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  if (!res.body) return res.arrayBuffer();
+function describe(err) {
+  if (!err) return 'unknown error';
+  if (err.name === 'AbortError' || err.name === 'TimeoutError') return 'timed out';
+  return err.message || String(err);
+}
 
-  const reader = res.body.getReader();
-  const chunks = [];
-  let received = 0;
+async function fetchBuffer(url, onProgress = null, options = {}) {
+  const retries = options.retries ?? RETRIES;
+  const timeout = options.timeout ?? TIMEOUT;
+  let lastError = null;
 
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    if (onProgress) onProgress(received, total);
-  }
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt) await sleep(BACKOFF * 2 ** (attempt - 1) + Math.random() * 180);
 
-  if (alreadyDecoded) {
-    const merged = new Uint8Array(received);
-    let at = 0;
-    for (const c of chunks) {
-      merged.set(c, at);
-      at += c.length;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const res = await fetch(url, { cache: 'default', signal: controller.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const total = Number(res.headers.get('content-length')) || 0;
+      if (!res.body || !onProgress) {
+        const buffer = await res.arrayBuffer();
+        clearTimeout(timer);
+        if (onProgress) onProgress(buffer.byteLength, buffer.byteLength);
+        return buffer;
+      }
+
+      const reader = res.body.getReader();
+      const chunks = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        onProgress(received, total);
+      }
+      clearTimeout(timer);
+
+      const merged = new Uint8Array(received);
+      let at = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, at);
+        at += chunk.length;
+      }
+      return merged.buffer;
+    } catch (err) {
+      clearTimeout(timer);
+      lastError = err;
     }
-    return merged.buffer;
   }
 
-  if (typeof DecompressionStream === 'undefined') {
-    throw new Error('This browser cannot decompress gzip data (DecompressionStream missing).');
-  }
-  const stream = new Blob([chunks]).stream().pipeThrough(new DecompressionStream('gzip'));
-  return new Response(stream).arrayBuffer();
+  throw new Error(`${url}: ${describe(lastError)}`);
+}
+
+async function fetchJSON(url) {
+  const buffer = await fetchBuffer(url);
+  return JSON.parse(new TextDecoder().decode(buffer));
 }
 
 export async function loadCityMeta(base = 'data/') {
-  const res = await fetch(`${base}city.json`, { cache: 'force-cache' });
-  if (!res.ok) throw new Error(`city.json: HTTP ${res.status}`);
-  return res.json();
+  return fetchJSON(`${base}city.json`);
 }
 
-export async function loadBuildings(base, onProgress) {
-  const buf = await fetchWithProgress(`${base}buildings.bin.gz`, onProgress);
-  return new BuildingFile(buf);
+export async function loadBuildingIndex(base, meta) {
+  const path = (meta && meta.buildings && meta.buildings.index) || 'buildings/index.json';
+  return fetchJSON(`${base}${path}`);
 }
 
-export async function loadRoads(base, onProgress) {
-  const buf = await fetchWithProgress(`${base}roads.bin.gz`, onProgress);
-  return new RoadFile(buf);
+export async function loadBuildingChunk(base, meta, file) {
+  const dir = (meta && meta.buildings && meta.buildings.chunkDir) || 'buildings/';
+  const buffer = await fetchBuffer(`${base}${dir}${file}`);
+  return new BuildingChunk(buffer);
+}
+
+export async function loadRoads(base, meta, onProgress = null) {
+  const file = (meta && meta.roads && meta.roads.file) || 'roads.bin';
+  const buffer = await fetchBuffer(`${base}${file}`, onProgress, { timeout: 30000 });
+  return new RoadFile(buffer);
 }

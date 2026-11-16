@@ -16,15 +16,17 @@
  "widthM": 40369.200989441124,
  "heightM": 44229.599999999846,
  "buildings": {
-  "count": 273220,
-  "file": "buildings.bin.gz",
+  "count": 160843,
+  "index": "buildings/index.json",
+  "chunkDir": "buildings/",
   "tile": 5000.0,
   "quant": 0.25,
   "cols": 9,
-  "rows": 9
+  "rows": 9,
+  "chunks": 64
  },
  "roads": {
-  "file": "roads.bin.gz",
+  "file": "roads.bin",
   "count": 21641
  },
  "masks": {
@@ -32,13 +34,13 @@
   "green": "green.png",
   "urban": "urban.png",
   "res": {
-   "water": 2048,
-   "green": 1024,
-   "urban": 1024
+   "water": 1024,
+   "green": 512,
+   "urban": 512
   }
  },
  "stats": {
-  "buildings": 273220,
+  "buildings": 160843,
   "heightBuckets": {
    "0-12m": 256843,
    "12-30m": 12291,
@@ -1868,6 +1870,8 @@
     25.0633,
     "yes"
    ]
-  ]
- }
+  ],
+  "droppedLowDetail": 112315
+ },
+ "dataVersion": 2
 }

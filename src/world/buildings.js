@@ -1,10 +1,10 @@
 /**
  * The building stock.
  *
- * 273,000 OpenStreetMap footprints are extruded into a handful of chunked
- * meshes. Everything is quantised: positions are int16 at 0.25 m relative to
- * a chunk origin, colours are 8-bit sRGB and indices are uint16, which keeps
- * the whole city inside roughly 70 MB of GPU buffers.
+ * OpenStreetMap footprints arrive in small spatial chunks and are extruded as
+ * each chunk arrives, so the city appears within seconds and fills in as the
+ * rest streams. Everything is quantised: positions are int16 at 0.25 m
+ * relative to a chunk origin, colours are 8-bit sRGB and indices are uint16.
  */
 
 import * as THREE from 'three';
@@ -34,7 +34,7 @@ function rand01(seed) {
   return ((t ^ (t >>> 15)) >>> 0) / 4294967296;
 }
 
-export function createBuildings(file) {
+export function createBuildings() {
   const group = new THREE.Group();
   group.name = 'buildings';
 
@@ -128,7 +128,7 @@ export function createBuildings(file) {
   let maxX = -Infinity;
   let maxZ = -Infinity;
 
-  const ring = new Float64Array(128);
+  let ring = new Float64Array(512);
 
   function flush() {
     if (!vCount) return;
@@ -172,24 +172,11 @@ export function createBuildings(file) {
     maxZ = -Infinity;
   }
 
-  /** Extrude every footprint of the extract. */
-  async function build(minHeight = 0, suppressors = [], onProgress = null) {
-    vCount = 0;
-    iCount = 0;
-    minX = Infinity;
-    minZ = Infinity;
-    maxX = -Infinity;
-    maxZ = -Infinity;
-    stats.buildings = 0;
-    stats.vertices = 0;
-    stats.chunks = 0;
-
-    const yieldFrame = () => new Promise((r) => setTimeout(r, 0));
-
-    for (let t = 0; t < file.tileCount; t++) {
-      const tile = file.tile(t);
-      eachBuilding(tile, (pts, n, height, facade, seed) => {
+  /** Extrude every footprint in one spatial chunk. */
+  function addTile(tile, minHeight = 0, suppressors = []) {
+    eachBuilding(tile, (pts, n, height, facade, seed) => {
         if (height < minHeight) return;
+        if (n * 2 > ring.length) ring = new Float64Array(n * 2);
 
         let bMinX = Infinity;
         let bMaxX = -Infinity;
@@ -342,11 +329,7 @@ export function createBuildings(file) {
         if (bMaxX > maxX) maxX = bMaxX;
         if (bMinZ < minZ) minZ = bMinZ;
         if (bMaxZ > maxZ) maxZ = bMaxZ;
-      });
-
-      if (onProgress) onProgress((t + 1) / file.tileCount);
-      await yieldFrame();
-    }
+    });
     flush();
     return stats;
   }
@@ -356,7 +339,7 @@ export function createBuildings(file) {
     material,
     meshes,
     stats,
-    build,
+    addTile,
     apply(p) {
       uniforms.uNight.value = p.night;
       uniforms.uGlow.value.set(p.night > 0.5 ? 0xffc078 : 0xffd9a0);

@@ -5,12 +5,12 @@
 import * as THREE from 'three';
 import { Viewer } from './core/viewer.js';
 import { UI } from './ui/ui.js';
-import { loadCityMeta, loadBuildings, loadRoads } from './data/load.js';
+import { loadCityMeta, loadBuildingIndex, loadBuildingChunk, loadRoads } from './data/load.js';
 import { createGround } from './world/ground.js';
 import { createBuildings } from './world/buildings.js';
 import { createRoads } from './world/roads.js';
 import { createLandmarks } from './world/landmarks.js';
-import { LANDMARKS, TOWERS, lonToX, latToZ, xToLon, zToLat } from './core/config.js';
+import { CENTER, TOWERS, lonToX, latToZ, xToLon, zToLat } from './core/config.js';
 
 const DATA = 'data/';
 
@@ -105,68 +105,167 @@ function main() {
     });
   }
 
+  function makeFallbackTexture(value) {
+    const tex = new THREE.DataTexture(new Uint8Array([value]), 1, 1, THREE.RedFormat);
+    tex.needsUpdate = true;
+    tex.colorSpace = THREE.NoColorSpace;
+    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.NearestFilter;
+    return tex;
+  }
+
+  function chunkDistance(chunk, target) {
+    const x0 = chunk.x0 - CENTER.x;
+    const x1 = chunk.x1 - CENTER.x;
+    const z0 = CENTER.y - chunk.y1;
+    const z1 = CENTER.y - chunk.y0;
+    const dx = target.x < x0 ? x0 - target.x : target.x > x1 ? target.x - x1 : 0;
+    const dz = target.z < z0 ? z0 - target.z : target.z > z1 ? target.z - z1 : 0;
+    return Math.hypot(dx, dz);
+  }
+
+  function streamBuildings(index, meta, minHeight, suppressors) {
+    const buildings = world.buildings;
+    const all = (index.chunks || []).slice();
+    const status = { total: all.length, succeeded: 0, failed: 0, ready: false };
+    if (window.__dubai) window.__dubai.chunkStatus = status;
+
+    if (!all.length) {
+      ui.showLoaderError('The city index is empty.');
+      return;
+    }
+
+    all.sort((a, b) => chunkDistance(a, viewer.controls.target) - chunkDistance(b, viewer.controls.target));
+
+    // Keep the first screen under ~3 MB even on an uncompressed response.
+    const BOOT_BYTES = 1000 * 1024;
+    const boot = [];
+    let bootBytes = 0;
+    for (const chunk of all) {
+      if (boot.length && bootBytes + chunk.bytes > BOOT_BYTES) break;
+      boot.push(chunk);
+      bootBytes += chunk.bytes;
+    }
+    const bootIds = new Set(boot.map((chunk) => chunk.id));
+
+    const queue = all.slice();
+    let bootLeft = boot.length;
+    let inFlight = 0;
+    let ready = false;
+
+    function markReady() {
+      if (ready) return;
+      ready = true;
+      status.ready = true;
+      ui.setProgress(1, 'Ready');
+      setTimeout(() => ui.hideLoader(), 220);
+    }
+
+    function updateBootProgress() {
+      if (ready) return;
+      const f = boot.length ? (boot.length - bootLeft) / boot.length : 0;
+      ui.setProgress(0.28 + 0.62 * Math.min(1, f), 'Raising the skyline');
+    }
+
+    function sortQueue() {
+      const target = viewer.controls.target;
+      queue.sort((a, b) => chunkDistance(a, target) - chunkDistance(b, target));
+    }
+
+    async function loadOne(chunk) {
+      inFlight++;
+      try {
+        const data = await loadBuildingChunk(DATA, meta, chunk.file);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        buildings.addTile(data.tile(), minHeight, suppressors);
+        status.succeeded++;
+        markReady();
+      } catch (err) {
+        status.failed++;
+        console.warn(`[dubai] building chunk ${chunk.id} failed:`, err);
+      } finally {
+        if (bootIds.has(chunk.id) && bootLeft > 0) bootLeft--;
+        updateBootProgress();
+        inFlight--;
+        pump();
+      }
+    }
+
+    function pump() {
+      if (ready) sortQueue();
+      const max = ready ? 4 : bootLeft > 0 ? 2 : 3;
+      while (inFlight < max && queue.length) {
+        loadOne(queue.shift());
+      }
+      if (!queue.length && inFlight === 0) {
+        if (!status.succeeded) {
+          ui.showLoaderError('We could not load the city buildings. Check your connection and try again.');
+        } else {
+          markReady();
+        }
+      }
+    }
+
+    pump();
+  }
+
   async function boot() {
     try {
       ui.setProgress(0.02, 'Reading the survey');
       const meta = await loadCityMeta(DATA);
 
-      ui.setProgress(0.07, 'Charting the shoreline');
-      const [water, green, urban] = await Promise.all([
-        loadTexture(`${DATA}water.png`),
-        loadTexture(`${DATA}green.png`),
-        loadTexture(`${DATA}urban.png`),
+      ui.setProgress(0.06, 'Charting the shoreline');
+      const [index, water, green, urban, roadFile] = await Promise.all([
+        loadBuildingIndex(DATA, meta).catch((err) => {
+          console.warn('[dubai] building index failed:', err);
+          return null;
+        }),
+        loadTexture(`${DATA}water.png`).catch(() => makeFallbackTexture(255)),
+        loadTexture(`${DATA}green.png`).catch(() => makeFallbackTexture(0)),
+        loadTexture(`${DATA}urban.png`).catch(() => makeFallbackTexture(0)),
+        loadRoads(DATA, meta).catch((err) => {
+          console.warn('[dubai] roads failed:', err);
+          return null;
+        }),
       ]);
 
-      ui.setProgress(0.16, 'Tracing the road network');
-      const roadFile = await loadRoads(DATA, (loaded, total) => {
-        const f = total ? loaded / total : 0;
-        ui.setProgress(0.16 + 0.1 * f, 'Tracing the road network');
-      });
+      if (!index) throw new Error('The city index could not be loaded.');
 
-      ui.setProgress(0.28, 'Raising the skyline');
-      const buildingFile = await loadBuildings(DATA, (loaded, total) => {
-        const f = total ? loaded / total : 0;
-        ui.setProgress(0.28 + 0.44 * f, 'Raising the skyline');
-      });
+      ui.setProgress(0.18, 'Laying out the ground');
+      const ground = createGround({ water, green, urban }, viewer.palette);
+      viewer.scene.add(ground.mesh);
+      world.ground = ground;
 
-      ui.setProgress(0.74, 'Laying out the blocks');
-      const roads = createRoads(roadFile);
-      viewer.scene.add(roads.mesh);
-      world.roads = roads;
+      if (roadFile) {
+        ui.setProgress(0.22, 'Tracing the road network');
+        const roads = createRoads(roadFile);
+        viewer.scene.add(roads.mesh);
+        world.roads = roads;
+      }
 
-      ui.setProgress(0.78, 'Building 273,000 properties');
-      const buildings = createBuildings(buildingFile);
+      ui.setProgress(0.25, 'Modelling the landmarks');
+      const landmarks = createLandmarks();
+      viewer.scene.add(landmarks.group);
+      world.landmarks = landmarks;
+      applyPalette(viewer.palette);
+
       const suppressors = TOWERS.map((t) => ({
         x: lonToX(t.lon),
         z: latToZ(t.lat),
         r: t.kind === 'atlantis' || t.kind === 'wheel' ? 170 : t.kind === 'sail' ? 130 : 95,
       }));
       const minHeight = skyline !== null ? parseFloat(skyline) || 40 : quality === 'low' ? 7.5 : 0;
-      await buildings.build(minHeight, suppressors, (f) => {
-        ui.setProgress(0.78 + 0.16 * f, 'Building 273,000 properties');
-      });
+
+      const buildings = createBuildings();
       viewer.scene.add(buildings.group);
       world.buildings = buildings;
 
-      ui.setProgress(0.95, 'Modelling the landmarks');
-      const ground = createGround({ water, green, urban }, viewer.palette);
-      viewer.scene.add(ground.mesh);
-      world.ground = ground;
-
-      const landmarks = createLandmarks();
-      viewer.scene.add(landmarks.group);
-      world.landmarks = landmarks;
-
-      applyPalette(viewer.palette);
-
-      ui.setProgress(1, 'Ready');
-      setTimeout(() => ui.hideLoader(), 320);
-
-      wireInteraction();
-      start();
+      ui.setProgress(0.28, 'Raising the skyline');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      streamBuildings(index, meta, minHeight, suppressors);
     } catch (err) {
       console.error(err);
-      ui.showLoaderError(err && err.message ? err.message : String(err));
+      ui.showLoaderError('We could not load the city. Check your connection and try again.');
     }
   }
 
@@ -275,6 +374,8 @@ function main() {
     };
   }
 
+  wireInteraction();
+  start();
   boot();
 
 }

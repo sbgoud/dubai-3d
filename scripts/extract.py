@@ -4,16 +4,15 @@ static files for the Dubai 3D web app.
 
 Outputs (public/data):
     city.json          metadata, landmark hints, statistics
-    buildings.bin.gz   tiled building footprints + heights
-    roads.bin.gz       major road centrelines
-    water.png          signed distance field to the shoreline (2048^2)
-    green.png          vegetation density (1024^2)
-    urban.png          built-up density (1024^2)
+    buildings/         split spatial chunks + index.json (uncompressed)
+    roads.bin          major road centrelines (uncompressed)
+    water.png          signed distance field to the shoreline (1024^2)
+    green.png          vegetation density (512^2)
+    urban.png          built-up density (512^2)
 
 Nothing here runs at page load time; the app only fetches these static files.
 """
 
-import gzip
 import json
 import math
 import os
@@ -29,6 +28,8 @@ from scipy import ndimage
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, "public", "data")
+sys.path.insert(0, HERE)
+from tile_format import write_building_chunks, write_roads_file  # noqa: E402
 
 # Central Dubai bounding box (west, south, east, north).
 BBOX = (55.02, 24.96, 55.42, 25.36)
@@ -40,8 +41,8 @@ HSPAN = (BBOX[3] - BBOX[1]) * M_LAT
 
 TILE_M = 5000.0          # tile size in metres
 TILE_Q = 0.25            # metres per stored vertex unit (i16)
-WATER_RES = 2048         # water / coastline raster resolution
-MASK_RES = 1024          # green + urban raster resolution
+WATER_RES = 1024         # water / coastline raster resolution
+MASK_RES = 512           # green + urban raster resolution
 
 ROAD_CLASSES = {
     "motorway": 0, "motorway_link": 0,
@@ -592,86 +593,16 @@ def write_png_gray(path, arr):
 
 
 def write_buildings(buildings):
-    cols = int(math.ceil(WSPAN / TILE_M))
-    rows = int(math.ceil(HSPAN / TILE_M))
-    tiles = {}
-    for rings, h, ft, seed, name in buildings:
-        ring = rings[0]
-        cx = sum(p[0] for p in ring) / len(ring)
-        cy = sum(p[1] for p in ring) / len(ring)
-        tx = min(max(int(cx // TILE_M), 0), cols - 1)
-        ty = min(max(int(cy // TILE_M), 0), rows - 1)
-        tiles.setdefault((tx, ty), []).append((rings, h, ft, seed))
-
-    index = []
-    body_blob = bytearray()
-    for key in sorted(tiles.keys()):
-        items = tiles[key]
-        ox = key[0] * TILE_M
-        oy = key[1] * TILE_M
-        body = bytearray()
-        body += struct.pack("<I", len(items))
-        body += struct.pack("<2f", ox, oy)
-        ring_idx = []
-        ring_vstart = []
-        bld_ring_start = [0]
-        verts = []
-        heights = []
-        metas = []
-        for rings, h, ft, seed in items:
-            for ring in rings:
-                ring_idx.append(len(ring_vstart))
-                ring_vstart.append(len(verts) // 2)
-                for x, y in ring:
-                    verts.append(int(round((x - ox) / TILE_Q)))
-                    verts.append(int(round((y - oy) / TILE_Q)))
-            heights.append(int(round(h * 10)))
-            metas.append((ft & 0xF) | ((seed & 0xFFF) << 4) | ((len(rings) - 1) << 16))
-            bld_ring_start.append(len(ring_idx))
-        body += struct.pack("<%dI" % len(bld_ring_start), *bld_ring_start)
-        body += struct.pack("<%dI" % len(ring_idx), *ring_idx)
-        body += struct.pack("<%dI" % (len(ring_vstart) + 1), *ring_vstart, len(ring_vstart))
-        body += struct.pack("<%dh" % len(verts), *verts)
-        body += struct.pack("<%dH" % len(heights), *heights)
-        body += struct.pack("<%dI" % len(metas), *metas)
-        index.append((key[0], key[1], len(body_blob), len(body)))
-        body_blob += body
-
-    out = bytearray()
-    out += struct.pack("<4sII", b"DB3B", 1, len(index))
-    out += struct.pack("<2d2f", LON0, LAT0, M_LAT, M_LON)
-    out += struct.pack("<2f", TILE_M, TILE_Q)
-    out += struct.pack("<2I", cols, rows)
-    out += struct.pack("<%dI" % len(index), *(i[2] for i in index))
-    out += body_blob
-    path = os.path.join(OUT, "buildings.bin.gz")
-    with gzip.open(path, "wb", compresslevel=9) as f:
-        f.write(bytes(out))
-    print("wrote buildings.bin.gz (%.1f kB, raw %.1f kB, %d tiles, %d buildings)"
-          % (os.path.getsize(path) / 1024, len(out) / 1024, len(index), len(buildings)))
+    result = write_building_chunks(
+        buildings, OUT, LON0, LAT0, M_LAT, M_LON, TILE_M,
+    )
+    print("wrote buildings/index.json (%d chunks, %d buildings)"
+          % (result["chunks"], result["total"]))
+    return result
 
 
 def write_roads(roads):
-    out = bytearray()
-    out += struct.pack("<4sII", b"DB3R", 1, len(roads))
-    poly_start = []
-    verts = []
-    classes = []
-    for cls, pts in roads:
-        poly_start.append(len(verts) // 2)
-        for x, y in pts:
-            verts.append(int(round(x * 10)))
-            verts.append(int(round(y * 10)))
-        classes.append(cls)
-    poly_start.append(len(verts) // 2)
-    out += struct.pack("<%dI" % len(poly_start), *poly_start)
-    out += struct.pack("<%di" % len(verts), *verts)
-    out += struct.pack("<%dB" % len(classes), *classes)
-    path = os.path.join(OUT, "roads.bin.gz")
-    with gzip.open(path, "wb", compresslevel=9) as f:
-        f.write(bytes(out))
-    print("wrote roads.bin.gz (%.1f kB, raw %.1f kB, %d ways)"
-          % (os.path.getsize(path) / 1024, len(out) / 1024, len(roads)))
+    write_roads_file(roads, os.path.join(OUT, "roads.bin"))
 
 
 def main():
@@ -779,7 +710,7 @@ def main():
     write_png_gray(os.path.join(OUT, "urban.png"), (urban * 255).astype(np.uint8))
     print("wrote green.png / urban.png")
 
-    write_buildings(col.buildings)
+    bstats = write_buildings(col.buildings)
     write_roads(col.roads)
 
     heights = np.array([b[1] for b in col.buildings]) if col.buildings else np.zeros(1)
@@ -793,6 +724,7 @@ def main():
     tall_sorted = sorted(col.tall, key=lambda r: -r[1])[:260]
     meta = {
         "generated": time.strftime("%Y-%m-%d"),
+        "dataVersion": 2,
         "source": "OpenStreetMap contributors (ODbL), via the Geofabrik GCC extract",
         "bbox": {"west": BBOX[0], "south": BBOX[1], "east": BBOX[2], "north": BBOX[3]},
         "origin": {"lon": LON0, "lat": LAT0},
@@ -800,13 +732,15 @@ def main():
         "mPerDegLon": M_LON,
         "widthM": WSPAN,
         "heightM": HSPAN,
-        "buildings": {"count": len(col.buildings), "file": "buildings.bin.gz",
-                      "tile": TILE_M, "quant": TILE_Q, "cols": int(math.ceil(WSPAN / TILE_M)),
-                      "rows": int(math.ceil(HSPAN / TILE_M))},
-        "roads": {"file": "roads.bin.gz", "count": len(col.roads)},
+        "buildings": {"count": bstats["total"], "index": "buildings/index.json",
+                      "chunkDir": "buildings/", "tile": TILE_M, "quant": TILE_Q,
+                      "cols": int(math.ceil(WSPAN / TILE_M)),
+                      "rows": int(math.ceil(HSPAN / TILE_M)), "chunks": bstats["chunks"]},
+        "roads": {"file": "roads.bin", "count": len(col.roads)},
         "masks": {"water": "water.png", "green": "green.png", "urban": "urban.png",
                   "res": {"water": WATER_RES, "green": MASK_RES, "urban": MASK_RES}},
-        "stats": {"buildings": len(col.buildings), "heightBuckets": buckets,
+        "stats": {"buildings": bstats["total"], "sourceBuildings": len(col.buildings),
+                  "droppedLowDetail": bstats["dropped"], "heightBuckets": buckets,
                   "maxHeight": float(heights.max()), "tallest": tall_sorted},
     }
     with open(os.path.join(OUT, "city.json"), "w") as f:
