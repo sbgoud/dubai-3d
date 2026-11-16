@@ -1,0 +1,27 @@
+DONE
+
+Root cause: the scale-bar "nice number" loop in src/ui/ui.js never advanced
+(`while (nice * power < metres) nice = nice === 5 ? ... : nice` kept `nice` at
+1), so UI.update() spun forever on the very first animation frame. The module
+script never finished evaluating, DOMContentLoaded never fired and the browser
+main thread was frozen - the page appeared hung with no city.
+
+Fixes pushed in 68fbd61:
+1. src/ui/ui.js  - rewritten "nice" number selection (1/2/5 x power), no infinite loop.
+2. index.html + src/style.css + public/fonts/ - the render-blocking Google Fonts
+   stylesheet is gone; the three typefaces are self-hosted as woff2 with
+   `font-display: swap`, so no third-party request can delay first paint.
+3. src/world/buildings.js - building indices use a Uint32Array; a full geometry
+   flush exceeds the 65535 limit of a Uint16Array and threw on dense chunks.
+
+Verification (headless Chrome /usr/bin/google-chrome, Playwright, Pixel 7
+viewport 412x915 @2.625):
+- live https://dubai-3d-mu.vercel.app/ after the Vercel auto-deploy
+  HTTP 200, DOMContentLoaded at 1.9 s, load event at 1.9 s,
+  readyState "complete", loader "Ready 100%", canvas rendered,
+  64/64 building chunks loaded, 0 failed, 155,292 buildings,
+  2,783,706 vertices, 0 console errors, 0 failed requests.
+- same test under Slow-4G throttling + 4x CPU slowdown: DOMContentLoaded at
+  2.3 s, 64/64 chunks, 0 errors, city rendered.
+- screenshot of the live mobile render: /workspace/dubai-live-mobile.png
+- npm run build passes (dist/assets/index-DhBiHZSJ.js, index-BVO7Xt_9.css).
